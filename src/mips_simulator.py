@@ -126,31 +126,42 @@ class mips_simulator:
                         self.beq_position = self.pc
                 self.pc += 1
 
-            # 检查是否有 beq 在 EX 阶段
-            has_beq_in_ex = any(stage.startswith("EX") and inst[0] == 'beq' 
-                               for inst, stage, _, _ in self.pipeline)
-
-            if has_beq_in_ex:
-                # 如果有 beq 在 EX，先执行再输出
-                self.update_pipeline()
-                if not self.pipeline and self.pc >= len(self.data_list):
-                    cycle -= 1
-                    break
-            else:
-                # 正常情况：先输出当前状态，再执行
-                if not self.pipeline and self.pc >= len(self.data_list):
-                    cycle -= 1
-                    break
-
-            # 记录当前周期状态
+            # 记录当前周期的状态（在 update 前）
             output.append(f'Cycle {cycle}')
-            for inst, stage, _, _ in sorted(self.pipeline, key=lambda x: 0 if x[1] != "IF" else 1):
-                stage_display = stage.split()[0] if ' ' in stage else stage
-                output.append(f'{inst[0]}: {stage if stage_display not in ["IF", "ID"] else stage_display}')
+            
+            # 特殊处理 beq 在 EX 阶段的情况
+            beq_in_ex = None
+            for inst, stage, _, result in self.pipeline:
+                if stage.startswith("EX") and inst[0] == 'beq':
+                    result = self.execute_in_ex(result)
+                    if self.branch_taken:
+                        beq_in_ex = (inst, f"MEM {self.get_control_signals(inst, 'MEM')}", 0, result)
+                        # 只输出 beq 和未被跳过的 IF 阶段指令
+                        for i, s, _, _ in self.pipeline:
+                            if i == inst:
+                                output.append(f'{i[0]}: EX {self.get_control_signals(i, "EX")}')
+                            elif s == "IF" and i not in self.skipped_instructions:
+                                output.append(f'{i[0]}: IF')
+                        break
 
-            if not has_beq_in_ex:
-                # 正常情况：在输出后执行
+            # 如果不是 beq 在 EX 阶段的特殊情况，正常输出
+            if not beq_in_ex:
+                for inst, stage, _, _ in sorted(self.pipeline, key=lambda x: 0 if x[1] != "IF" else 1):
+                    stage_display = stage.split()[0] if ' ' in stage else stage
+                    output.append(f'{inst[0]}: {stage if stage_display not in ["IF", "ID"] else stage_display}')
+
+            # 更新 pipeline
+            if beq_in_ex:
+                # 如果是 beq 跳转，特殊更新
+                self.pipeline = [beq_in_ex] + [(i, "ID", 0, None) for i, s, _, _ in self.pipeline 
+                                             if i not in self.skipped_instructions and s == "IF"]
+                self.branch_taken = False
+            else:
                 self.update_pipeline()
+
+            if not self.pipeline and self.pc >= len(self.data_list):
+                cycle -= 1
+                break
 
         return '\n'.join(output + [
             f'\n需要{cycle}個週期',
