@@ -9,6 +9,8 @@ class mips_simulator:
         self.skip_next = False
         self.current_pc = 0
         self.next_instruction = None
+        self.instructions_to_skip = 0
+        self.skipped_instructions = []  # 记录被跳过的指令
 
     CONTROL_SIGNALS = {
         'lw': {'EX': '01 010 11', 'MEM': '010 11', 'WB': '11'},
@@ -65,9 +67,13 @@ class mips_simulator:
             is_equal = result[1] == result[2]
             if is_equal:
                 self.branch_taken = True
-                self.branch_target = result[3]
-                self.skip_next = True
-                # 直接计算下一条指令的位置
+                self.instructions_to_skip = result[3]
+                # 记录要跳过的指令
+                start_pc = self.current_pc + 1
+                for i in range(self.instructions_to_skip):
+                    if start_pc + i < len(self.data_list):
+                        self.skipped_instructions.append(self.data_list[start_pc + i])
+                # 设置下一条要执行的指令
                 next_pc = self.current_pc + result[3] + 1
                 if next_pc < len(self.data_list):
                     self.next_instruction = self.data_list[next_pc]
@@ -92,11 +98,12 @@ class mips_simulator:
         stall_next = any(stage == "ID" and self.check_data_hazard(inst) 
                         for inst, stage, _, _ in self.pipeline)
 
-        for inst, stage, stall_count, result in self.pipeline:
-            # 如果是被跳过的指令，直接跳过
-            if self.skip_next and stage == "IF" and inst[0] == 'add':
-                continue
+        # 移除所有被跳过的指令
+        current_pipeline = [(inst, stage, stall_count, result) 
+                          for inst, stage, stall_count, result in self.pipeline 
+                          if inst not in self.skipped_instructions]
 
+        for inst, stage, stall_count, result in current_pipeline:
             if stall_count > 0:
                 new_pipeline.append((inst, stage, stall_count - 1, result))
                 continue
@@ -113,7 +120,6 @@ class mips_simulator:
             elif stage.startswith("EX"):
                 result = self.execute_in_ex(result)
                 if self.branch_taken and inst[0] == 'beq':
-                    # 如果beq条件成立，添加下一条指令到流水线
                     if self.next_instruction:
                         new_pipeline.append((self.next_instruction, "IF", 0, None))
                 new_pipeline.append((inst, f"MEM {self.get_control_signals(inst, 'MEM')}", 0, result))
@@ -124,25 +130,27 @@ class mips_simulator:
                 self.write_back(result)
 
         self.pipeline = new_pipeline
+        if self.branch_taken:
+            self.instructions_to_skip = 0
         self.skip_next = False
 
     def run(self):
         cycle = 0
         output = []
         pc = 0
-        self.current_pc = 0  # 初始化PC
+        self.current_pc = 0
 
         while pc < len(self.data_list) or self.pipeline:
             cycle += 1
             
             if not any(stage == "IF" for _, stage, _, _ in self.pipeline) and pc < len(self.data_list):
-                if not self.branch_taken:
-                    self.pipeline.append((self.data_list[pc], "IF", 0, None))
+                next_inst = self.data_list[pc]
+                if not self.branch_taken and next_inst not in self.skipped_instructions:
+                    self.pipeline.append((next_inst, "IF", 0, None))
                 pc += 1
-                self.current_pc = pc - 1  # 更新当前PC
+                self.current_pc = pc - 1
 
             output.append(f'Cycle {cycle}')
-            # 按照指定顺序显示流水线状态
             for inst, stage, _, _ in self.pipeline:
                 stage_display = stage.split()[0] if ' ' in stage else stage
                 output.append(f'{inst[0]}: {stage if stage_display not in ["IF", "ID"] else stage_display}')
@@ -151,9 +159,11 @@ class mips_simulator:
 
             if self.branch_taken and self.branch_target:
                 pc += self.branch_target
-                self.current_pc = pc - 1  # 更新当前PC
+                self.current_pc = pc - 1
                 self.branch_taken = False
                 self.branch_target = None
+                # 当跳转到新位置时，清除跳过的指令列表
+                self.skipped_instructions.clear()
 
         output.extend([
             f'\n需要{cycle}個週期',
