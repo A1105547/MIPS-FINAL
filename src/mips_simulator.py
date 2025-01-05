@@ -7,10 +7,8 @@ class mips_simulator:
         self.branch_taken = False
         self.branch_target = None
         self.skip_next = False
-        self.current_pc = 0
-        self.next_instruction = None
-        self.instructions_to_skip = 0
         self.skipped_instructions = []  # 记录被跳过的指令
+        self.pc = 0
 
     CONTROL_SIGNALS = {
         'lw': {'EX': '01 010 11', 'MEM': '010 11', 'WB': '11'},
@@ -63,27 +61,14 @@ class mips_simulator:
             return (op, result[1], result[2] + result[3])
         elif op == 'sub':
             return (op, result[1], result[2] - result[3])
-        elif op == 'beq':
-            is_equal = result[1] == result[2]
-            if is_equal:
-                self.branch_taken = True
-                self.instructions_to_skip = result[3]
-                # 记录要跳过的指令
-                start_pc = self.current_pc + 1
-                for i in range(self.instructions_to_skip):
-                    if start_pc + i < len(self.data_list):
-                        self.skipped_instructions.append(self.data_list[start_pc + i])
-                # 设置下一条要执行的指令
-                next_pc = self.current_pc + result[3] + 1
-                if next_pc < len(self.data_list):
-                    self.next_instruction = self.data_list[next_pc]
-            return (op, is_equal, result[3])
+        elif op == 'beq' and result[1] == result[2]:
+            self.branch_target = self.beq_position + result[3] + 1
+            self.skipped_instructions = self.data_list[self.beq_position + 1:self.branch_target]
+            self.branch_taken = True
         return result
 
     def execute_in_mem(self, result):
-        if result and result[0] == 'lw':
-            return (result[0], result[1], self.memory[result[2]])
-        return result
+        return (result[0], result[1], self.memory[result[2]]) if result and result[0] == 'lw' else result
 
     def write_back(self, result):
         if not result:
@@ -98,79 +83,79 @@ class mips_simulator:
         stall_next = any(stage == "ID" and self.check_data_hazard(inst) 
                         for inst, stage, _, _ in self.pipeline)
 
-        # 移除所有被跳过的指令
-        current_pipeline = [(inst, stage, stall_count, result) 
-                          for inst, stage, stall_count, result in self.pipeline 
-                          if inst not in self.skipped_instructions]
-
-        for inst, stage, stall_count, result in current_pipeline:
+        for inst, stage, stall_count, result in self.pipeline:
             if stall_count > 0:
                 new_pipeline.append((inst, stage, stall_count - 1, result))
                 continue
 
-            if stage == "IF":
-                new_stage = "IF" if stall_next else "ID"
-                new_pipeline.append((inst, new_stage, 0, None))
-            elif stage == "ID":
-                if self.check_data_hazard(inst):
-                    new_pipeline.append((inst, "ID", 0, None))
-                else:
-                    result = self.execute_in_id(inst)
-                    new_pipeline.append((inst, f"EX {self.get_control_signals(inst, 'EX')}", 0, result))
-            elif stage.startswith("EX"):
+            if stage.startswith("EX") and inst[0] == 'beq':
                 result = self.execute_in_ex(result)
-                if self.branch_taken and inst[0] == 'beq':
-                    if self.next_instruction:
-                        new_pipeline.append((self.next_instruction, "IF", 0, None))
-                new_pipeline.append((inst, f"MEM {self.get_control_signals(inst, 'MEM')}", 0, result))
+                if self.branch_taken:
+                    new_pipeline = [(i, f"MEM {self.get_control_signals(inst, 'MEM')}", 0, result) if i == inst 
+                                  else (i, "ID", 0, None) for i, s, c, r in self.pipeline 
+                                  if i == inst or (i not in self.skipped_instructions and s == "IF")]
+                    break
+            elif stage == "IF":
+                new_pipeline.append((inst, "ID" if not stall_next else "IF", 0, None))
+            elif stage == "ID" and not self.check_data_hazard(inst):
+                new_pipeline.append((inst, f"EX {self.get_control_signals(inst, 'EX')}", 0, self.execute_in_id(inst)))
+            elif stage == "ID":
+                new_pipeline.append((inst, "ID", 0, None))
+            elif stage.startswith("EX"):
+                new_pipeline.append((inst, f"MEM {self.get_control_signals(inst, 'MEM')}", 0, self.execute_in_ex(result)))
             elif stage.startswith("MEM"):
-                result = self.execute_in_mem(result)
-                new_pipeline.append((inst, f"WB {self.get_control_signals(inst, 'WB')}", 0, result))
+                new_pipeline.append((inst, f"WB {self.get_control_signals(inst, 'WB')}", 0, self.execute_in_mem(result)))
             elif stage.startswith("WB"):
                 self.write_back(result)
 
         self.pipeline = new_pipeline
-        if self.branch_taken:
-            self.instructions_to_skip = 0
-        self.skip_next = False
+        self.branch_taken = False
 
     def run(self):
         cycle = 0
         output = []
-        pc = 0
-        self.current_pc = 0
-
-        while pc < len(self.data_list) or self.pipeline:
+        while self.pc < len(self.data_list) or self.pipeline:
             cycle += 1
             
-            if not any(stage == "IF" for _, stage, _, _ in self.pipeline) and pc < len(self.data_list):
-                next_inst = self.data_list[pc]
-                if not self.branch_taken and next_inst not in self.skipped_instructions:
+            # 检查是否需要添加新指令到 IF
+            if not any(stage == "IF" for _, stage, _, _ in self.pipeline) and self.pc < len(self.data_list):
+                next_inst = self.data_list[self.pc]
+                if next_inst not in self.skipped_instructions:
                     self.pipeline.append((next_inst, "IF", 0, None))
-                pc += 1
-                self.current_pc = pc - 1
+                    if next_inst[0] == 'beq':
+                        self.beq_position = self.pc
+                self.pc += 1
 
+            # 检查是否有 beq 在 EX 阶段
+            has_beq_in_ex = any(stage.startswith("EX") and inst[0] == 'beq' 
+                               for inst, stage, _, _ in self.pipeline)
+
+            if has_beq_in_ex:
+                # 如果有 beq 在 EX，先执行再输出
+                self.update_pipeline()
+                if not self.pipeline and self.pc >= len(self.data_list):
+                    cycle -= 1
+                    break
+            else:
+                # 正常情况：先输出当前状态，再执行
+                if not self.pipeline and self.pc >= len(self.data_list):
+                    cycle -= 1
+                    break
+
+            # 记录当前周期状态
             output.append(f'Cycle {cycle}')
-            for inst, stage, _, _ in self.pipeline:
+            for inst, stage, _, _ in sorted(self.pipeline, key=lambda x: 0 if x[1] != "IF" else 1):
                 stage_display = stage.split()[0] if ' ' in stage else stage
                 output.append(f'{inst[0]}: {stage if stage_display not in ["IF", "ID"] else stage_display}')
 
-            self.update_pipeline()
+            if not has_beq_in_ex:
+                # 正常情况：在输出后执行
+                self.update_pipeline()
 
-            if self.branch_taken and self.branch_target:
-                pc += self.branch_target
-                self.current_pc = pc - 1
-                self.branch_taken = False
-                self.branch_target = None
-                # 当跳转到新位置时，清除跳过的指令列表
-                self.skipped_instructions.clear()
-
-        output.extend([
+        return '\n'.join(output + [
             f'\n需要{cycle}個週期',
             ' '.join(f'${i}' for i in range(len(self.registers))),
             ' '.join(str(i) for i in self.registers),
             ' '.join(f'W{i}' for i in range(len(self.memory))),
             ' '.join(str(i) for i in self.memory)
         ])
-        
-        return '\n'.join(output)
