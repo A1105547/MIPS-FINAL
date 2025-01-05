@@ -19,18 +19,14 @@ sub: EX 10 000 10
 beq: ID
 add: IF
 Cycle 6
-add: WB 10
-sub: MEM 000 10
-beq: EX X0 100 0X
-add: ID
-sw: IF
+sub: WB 10
+add: EX 10 000 10
+sw: ID
 Cycle 7
 sub: WB 10
-beq: MEM 100 0X
 add: EX 10 000 10
 sw: ID
 Cycle 8
-beq: WB 0X
 add: MEM 000 10
 sw: EX X1 001 0X
 Cycle 9
